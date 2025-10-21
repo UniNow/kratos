@@ -1,3 +1,16 @@
+# How to build kratos for UniNow
+
+1. Login into ghcr.io with docker
+```bash
+docker login ghcr.io
+```
+
+2. Build and push image to ghcr.io
+> Please make sure to increase the build number `-1` at the end of the command each time you make a new build!
+```bash
+docker buildx build --platform linux/arm64,linux/amd64 --push -f .docker/Dockerfile-build . -t ghcr.io/uninow/kratos:v1.3.1-1
+```
+
 <h1 align="center"><img src="https://raw.githubusercontent.com/ory/meta/master/static/banners/kratos.svg" alt="Ory Kratos - Cloud native Identity and User Management"></h1>
 
 <h4 align="center">
