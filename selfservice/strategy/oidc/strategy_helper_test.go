@@ -56,86 +56,98 @@ type idTokenClaims struct {
 }
 
 func (token *idTokenClaims) MarshalJSON() ([]byte, error) {
-	return json.Marshal(struct {
-		IdToken struct {
-			Website     string   `json:"website,omitempty"`
-			Groups      []string `json:"groups,omitempty"`
-			Picture     string   `json:"picture,omitempty"`
-			PhoneNumber string   `json:"phone_number,omitempty"`
-		} `json:"id_token"`
-	}{
-		IdToken: struct {
-			Website     string   `json:"website,omitempty"`
-			Groups      []string `json:"groups,omitempty"`
-			Picture     string   `json:"picture,omitempty"`
-			PhoneNumber string   `json:"phone_number,omitempty"`
+	return json.Marshal(
+		struct {
+			IdToken struct {
+				Website     string   `json:"website,omitempty"`
+				Groups      []string `json:"groups,omitempty"`
+				Picture     string   `json:"picture,omitempty"`
+				PhoneNumber string   `json:"phone_number,omitempty"`
+			} `json:"id_token"`
 		}{
-			Website:     token.traits.website,
-			Groups:      token.traits.groups,
-			Picture:     token.metadataPublic.picture,
-			PhoneNumber: token.metadataAdmin.phoneNumber,
+			IdToken: struct {
+				Website     string   `json:"website,omitempty"`
+				Groups      []string `json:"groups,omitempty"`
+				Picture     string   `json:"picture,omitempty"`
+				PhoneNumber string   `json:"phone_number,omitempty"`
+			}{
+				Website:     token.traits.website,
+				Groups:      token.traits.groups,
+				Picture:     token.metadataPublic.picture,
+				PhoneNumber: token.metadataAdmin.phoneNumber,
+			},
 		},
-	})
+	)
 }
 
 func createClient(t *testing.T, remote string, redir []string) (id, secret string) {
-	require.NoError(t, resilience.Retry(logrusx.New("", ""), time.Second*10, time.Minute*2, func() error {
-		var b bytes.Buffer
-		require.NoError(t, json.NewEncoder(&b).Encode(&struct {
-			Scope                   string   `json:"scope"`
-			GrantTypes              []string `json:"grant_types"`
-			ResponseTypes           []string `json:"response_types"`
-			RedirectURIs            []string `json:"redirect_uris"`
-			TokenEndpointAuthMethod string   `json:"token_endpoint_auth_method"`
-		}{
-			GrantTypes:    []string{"authorization_code", "refresh_token"},
-			ResponseTypes: []string{"code"},
-			Scope:         "offline offline_access openid",
-			RedirectURIs:  redir,
+	require.NoError(
+		t, resilience.Retry(
+			logrusx.New("", ""), time.Second*10, time.Minute*2, func() error {
+				var b bytes.Buffer
+				require.NoError(
+					t, json.NewEncoder(&b).Encode(
+						&struct {
+							Scope                   string   `json:"scope"`
+							GrantTypes              []string `json:"grant_types"`
+							ResponseTypes           []string `json:"response_types"`
+							RedirectURIs            []string `json:"redirect_uris"`
+							TokenEndpointAuthMethod string   `json:"token_endpoint_auth_method"`
+						}{
+							GrantTypes:    []string{"authorization_code", "refresh_token"},
+							ResponseTypes: []string{"code"},
+							Scope:         "offline offline_access openid",
+							RedirectURIs:  redir,
 
-			// This is a workaround to prevent golang.org/x/oauth2 from
-			// swallowing the actual error messages from failed token exchanges.
-			//
-			// The library first attempts to use the Authorization header to
-			// pass Client ID+secret during token exchange (client_secret_basic
-			// in Hydra terminology). If that fails (with any error), it tries
-			// again with the Client ID+secret passed in the HTTP POST body
-			// (client_secret_post in Hydra). If that also fails, this second
-			// error is returned.
-			//
-			// Now, if the the client was indeed configured to use
-			// client_secret_basic, but the token exchange fails for another
-			// reason, the error message will be swallowed and replaced with
-			// "invalid_client".
-			//
-			// Manually setting this to client_secret_post means that during
-			// tests, all token exchanges will first fail with `invalid_client`
-			// and then be retried with the correct method. This is the only way
-			// to get the actual error message from the server, however.
-			//
-			// https://github.com/golang/oauth2/blob/5fd42413edb3b1699004a31b72e485e0e4ba1b13/internal/token.go#L227-L242
-			TokenEndpointAuthMethod: "client_secret_post",
-		}))
+							// This is a workaround to prevent golang.org/x/oauth2 from
+							// swallowing the actual error messages from failed token exchanges.
+							//
+							// The library first attempts to use the Authorization header to
+							// pass Client ID+secret during token exchange (client_secret_basic
+							// in Hydra terminology). If that fails (with any error), it tries
+							// again with the Client ID+secret passed in the HTTP POST body
+							// (client_secret_post in Hydra). If that also fails, this second
+							// error is returned.
+							//
+							// Now, if the the client was indeed configured to use
+							// client_secret_basic, but the token exchange fails for another
+							// reason, the error message will be swallowed and replaced with
+							// "invalid_client".
+							//
+							// Manually setting this to client_secret_post means that during
+							// tests, all token exchanges will first fail with `invalid_client`
+							// and then be retried with the correct method. This is the only way
+							// to get the actual error message from the server, however.
+							//
+							// https://github.com/golang/oauth2/blob/5fd42413edb3b1699004a31b72e485e0e4ba1b13/internal/token.go#L227-L242
+							TokenEndpointAuthMethod: "client_secret_post",
+						},
+					),
+				)
 
-		res, err := http.Post(remote+"/admin/clients", "application/json", &b)
-		if err != nil {
-			return err
-		}
-		defer func() { _ = res.Body.Close() }()
+				res, err := http.Post(remote+"/admin/clients", "application/json", &b)
+				if err != nil {
+					return err
+				}
+				defer func() { _ = res.Body.Close() }()
 
-		body := ioutilx.MustReadAll(res.Body)
-		if http.StatusCreated != res.StatusCode {
-			return errors.Errorf("got status code: %d\n%s", res.StatusCode, body)
-		}
+				body := ioutilx.MustReadAll(res.Body)
+				if http.StatusCreated != res.StatusCode {
+					return errors.Errorf("got status code: %d\n%s", res.StatusCode, body)
+				}
 
-		id = gjson.GetBytes(body, "client_id").String()
-		secret = gjson.GetBytes(body, "client_secret").String()
-		return nil
-	}))
+				id = gjson.GetBytes(body, "client_id").String()
+				secret = gjson.GetBytes(body, "client_secret").String()
+				return nil
+			},
+		),
+	)
 	return
 }
 
-func newHydraIntegration(t *testing.T, remote *string, subject *string, claims *idTokenClaims, scope *[]string, addr string) (*http.Server, string) {
+func newHydraIntegration(
+	t *testing.T, remote *string, subject *string, claims *idTokenClaims, scope *[]string, addr string,
+) (*http.Server, string) {
 	router := http.NewServeMux()
 
 	type p struct {
@@ -166,34 +178,42 @@ func newHydraIntegration(t *testing.T, remote *string, subject *string, claims *
 	}
 
 	router.HandleFunc("GET /login", func(w http.ResponseWriter, r *http.Request) {
-		require.NotEmpty(t, *remote)
-		require.NotEmpty(t, *subject)
+			require.NotEmpty(t, *remote)
+			require.NotEmpty(t, *subject)
 
-		challenge := r.URL.Query().Get("login_challenge")
-		require.NotEmpty(t, challenge)
+			challenge := r.URL.Query().Get("login_challenge")
+			require.NotEmpty(t, challenge)
 
-		var b bytes.Buffer
-		require.NoError(t, json.NewEncoder(&b).Encode(&p{
-			Subject: *subject,
-		}))
-		href := urlx.MustJoin(*remote, "/admin/oauth2/auth/requests/login/accept") + "?login_challenge=" + challenge
-		do(w, r, href, &b)
-	})
+			var b bytes.Buffer
+			require.NoError(
+				t, json.NewEncoder(&b).Encode(
+					&p{
+						Subject: *subject,
+					},
+				),
+			)
+			href := urlx.MustJoin(*remote, "/admin/oauth2/auth/requests/login/accept") + "?login_challenge=" + challenge
+			do(w, r, href, &b)
+		},
+	)
 
 	router.HandleFunc("GET /consent", func(w http.ResponseWriter, r *http.Request) {
-		require.NotEmpty(t, *remote)
-		require.NotNil(t, *scope)
+			require.NotEmpty(t, *remote)
+			require.NotNil(t, *scope)
 
-		challenge := r.URL.Query().Get("consent_challenge")
-		require.NotEmpty(t, challenge)
+			challenge := r.URL.Query().Get("consent_challenge")
+			require.NotEmpty(t, challenge)
 
-		var b bytes.Buffer
-		msg, err := json.Marshal(claims)
-		require.NoError(t, err)
-		require.NoError(t, json.NewEncoder(&b).Encode(&p{GrantScope: *scope, Session: msg}))
-		href := urlx.MustJoin(*remote, "/admin/oauth2/auth/requests/consent/accept") + "?consent_challenge=" + challenge
-		do(w, r, href, &b)
-	})
+			var b bytes.Buffer
+			msg, err := json.Marshal(claims)
+			require.NoError(t, err)
+			require.NoError(t, json.NewEncoder(&b).Encode(&p{GrantScope: *scope, Session: msg}))
+			href := urlx.MustJoin(
+				*remote, "/admin/oauth2/auth/requests/consent/accept",
+			) + "?consent_challenge=" + challenge
+			do(w, r, href, &b)
+		},
+	)
 
 	if addr == "" {
 		server := httptest.NewServer(router)
@@ -211,23 +231,29 @@ func newHydraIntegration(t *testing.T, remote *string, subject *string, claims *
 	go func() {
 		_ = server.Serve(listener)
 	}()
-	t.Cleanup(func() {
-		assert.NoError(t, server.Close())
-	})
+	t.Cleanup(
+		func() {
+			assert.NoError(t, server.Close())
+		},
+	)
 	return server, addr
 }
 
 func newReturnTs(t *testing.T, reg driver.Registry) *httptest.Server {
 	ctx := context.Background()
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/app_code" {
-			reg.Writer().Write(w, r, "ok")
-			return
-		}
-		sess, err := reg.SessionManager().FetchFromRequest(r.Context(), r)
-		require.NoError(t, err)
-		reg.Writer().Write(w, r, sess)
-	}))
+	ts := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/app_code" {
+					reg.Writer().Write(w, r, "ok")
+					return
+				}
+				sess, err := reg.SessionManager().FetchFromRequest(r.Context(), r)
+				require.NoError(t, err)
+				reg.Writer().Write(w, r, sess)
+			},
+		),
+	)
 	reg.Config().MustSet(ctx, config.ViperKeySelfServiceBrowserDefaultReturnTo, ts.URL)
 	t.Cleanup(ts.Close)
 	return ts
@@ -235,21 +261,29 @@ func newReturnTs(t *testing.T, reg driver.Registry) *httptest.Server {
 
 func newUI(t *testing.T, reg driver.Registry) *httptest.Server {
 	ctx := context.Background()
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var e interface{}
-		var err error
-		switch r.URL.Path {
-		case "/login":
-			e, err = reg.LoginFlowPersister().GetLoginFlow(r.Context(), x.ParseUUID(r.URL.Query().Get("flow")))
-		case "/registration":
-			e, err = reg.RegistrationFlowPersister().GetRegistrationFlow(r.Context(), x.ParseUUID(r.URL.Query().Get("flow")))
-		case "/settings":
-			e, err = reg.SettingsFlowPersister().GetSettingsFlow(r.Context(), x.ParseUUID(r.URL.Query().Get("flow")))
-		}
+	ts := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				var e interface{}
+				var err error
+				switch r.URL.Path {
+				case "/login":
+					e, err = reg.LoginFlowPersister().GetLoginFlow(r.Context(), x.ParseUUID(r.URL.Query().Get("flow")))
+				case "/registration":
+					e, err = reg.RegistrationFlowPersister().GetRegistrationFlow(
+						r.Context(), x.ParseUUID(r.URL.Query().Get("flow")),
+					)
+				case "/settings":
+					e, err = reg.SettingsFlowPersister().GetSettingsFlow(
+						r.Context(), x.ParseUUID(r.URL.Query().Get("flow")),
+					)
+				}
 
-		require.NoError(t, err)
-		reg.Writer().Write(w, r, e)
-	}))
+				require.NoError(t, err)
+				reg.Writer().Write(w, r, e)
+			},
+		),
+	)
 	t.Cleanup(ts.Close)
 	reg.Config().MustSet(ctx, config.ViperKeySelfServiceLoginUI, ts.URL+"/login")
 	reg.Config().MustSet(ctx, config.ViperKeySelfServiceRegistrationUI, ts.URL+"/registration")
@@ -257,14 +291,20 @@ func newUI(t *testing.T, reg driver.Registry) *httptest.Server {
 	return ts
 }
 
-func newHydra(t *testing.T, subject *string, claims *idTokenClaims, scope *[]string) (remoteAdmin, remotePublic, hydraIntegrationTSURL string) {
+func newHydra(
+	t *testing.T, subject *string, claims *idTokenClaims, scope *[]string,
+) (remoteAdmin, remotePublic, hydraIntegrationTSURL string) {
 	remoteAdmin = os.Getenv("TEST_SELFSERVICE_OIDC_HYDRA_ADMIN")
 	remotePublic = os.Getenv("TEST_SELFSERVICE_OIDC_HYDRA_PUBLIC")
 
-	hydraIntegrationTS, hydraIntegrationTSURL := newHydraIntegration(t, &remoteAdmin, subject, claims, scope, os.Getenv("TEST_SELFSERVICE_OIDC_HYDRA_INTEGRATION_ADDR"))
-	t.Cleanup(func() {
-		require.NoError(t, hydraIntegrationTS.Close())
-	})
+	hydraIntegrationTS, hydraIntegrationTSURL := newHydraIntegration(
+		t, &remoteAdmin, subject, claims, scope, os.Getenv("TEST_SELFSERVICE_OIDC_HYDRA_INTEGRATION_ADDR"),
+	)
+	t.Cleanup(
+		func() {
+			require.NoError(t, hydraIntegrationTS.Close())
+		},
+	)
 
 	if remotePublic == "" && remoteAdmin == "" {
 		t.Logf("Environment did not provide Ory Hydra, starting fresh.")
@@ -291,12 +331,14 @@ func newHydra(t *testing.T, subject *string, claims *idTokenClaims, scope *[]str
 				"4444/tcp": {{HostIP: "", HostPort: strconv.Itoa(publicPort)}},
 				"4445/tcp": {{HostIP: "", HostPort: ""}}, // Let Docker assign random port
 			},
-		})
+		)
 		require.NoError(t, err)
-		t.Cleanup(func() {
-			require.NoError(t, hydra.Close())
-		})
-		require.NoError(t, hydra.Expire(uint(60*5)))
+		t.Cleanup(
+			func() {
+				require.NoError(t, hydra.Close())
+			},
+		)
+		require.NoError(t, hydra.Expire(uint(60*10)))
 
 		require.NotEmpty(t, hydra.GetPort("4444/tcp"), "%+v", hydra.Container.NetworkSettings.Ports)
 		require.NotEmpty(t, hydra.GetPort("4445/tcp"), "%+v", hydra.Container)
@@ -343,7 +385,9 @@ func newOIDCProvider(
 	id string,
 	opts ...func(*oidc.Configuration),
 ) oidc.Configuration {
-	clientID, secret := createClient(t, hydraAdmin, []string{kratos.URL + oidc.RouteBase + "/callback/" + id, kratos.URL + oidc.RouteCallbackGeneric})
+	clientID, secret := createClient(
+		t, hydraAdmin, []string{kratos.URL + oidc.RouteBase + "/callback/" + id, kratos.URL + oidc.RouteCallbackGeneric},
+	)
 
 	cfg := oidc.Configuration{
 		Provider:     "generic",
@@ -369,10 +413,12 @@ func viperSetProviderConfig(t *testing.T, conf *config.Config, providers ...oidc
 	conf.MustSet(ctx, baseKey+".config", &oidc.ConfigurationCollection{Providers: providers})
 	conf.MustSet(ctx, baseKey+".enabled", true)
 
-	t.Cleanup(func() {
-		conf.MustSet(ctx, baseKey+".config", currentConfig)
-		conf.MustSet(ctx, baseKey+".enabled", currentEnabled)
-	})
+	t.Cleanup(
+		func() {
+			conf.MustSet(ctx, baseKey+".config", currentConfig)
+			conf.MustSet(ctx, baseKey+".enabled", currentEnabled)
+		},
+	)
 }
 
 // AssertSystemError asserts an error ui response
@@ -402,10 +448,12 @@ type claims struct {
 func createIdToken(t *testing.T, cl jwt.RegisteredClaims) string {
 	key := &jwk.KeySpec{}
 	require.NoError(t, json.Unmarshal(rawKey, key))
-	token := jwt.NewWithClaims(jwt.SigningMethodRS256, &claims{
-		RegisteredClaims: &cl,
-		Email:            "acme@ory.sh",
-	})
+	token := jwt.NewWithClaims(
+		jwt.SigningMethodRS256, &claims{
+			RegisteredClaims: &cl,
+			Email:            "acme@ory.sh",
+		},
+	)
 	token.Header["kid"] = key.KeyID
 	s, err := token.SignedString(key.Key)
 	require.NoError(t, err)

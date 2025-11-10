@@ -159,11 +159,16 @@ func (s *Strategy) handleConflictingIdentity(ctx context.Context, w http.Respons
 	return verdict, existingIdentity, creds, nil
 }
 
-func (s *Strategy) ProcessLogin(ctx context.Context, w http.ResponseWriter, r *http.Request, loginFlow *login.Flow, token *identity.CredentialsOIDCEncryptedTokens, claims *Claims, provider Provider, container *AuthCodeContainer) (_ *registration.Flow, err error) {
+func (s *Strategy) ProcessLogin(
+	ctx context.Context, w http.ResponseWriter, r *http.Request, loginFlow *login.Flow,
+	token *identity.CredentialsOIDCEncryptedTokens, claims *Claims, provider Provider, container *AuthCodeContainer,
+) (_ *registration.Flow, err error) {
 	ctx, span := s.d.Tracer(ctx).Tracer().Start(ctx, "selfservice.strategy.oidc.Strategy.processLogin")
 	defer otelx.End(span, &err)
 
-	i, c, err := s.d.PrivilegedIdentityPool().FindByCredentialsIdentifier(ctx, s.ID(), identity.OIDCUniqueID(provider.Config().ID, claims.Subject))
+	i, c, err := s.d.PrivilegedIdentityPool().FindByCredentialsIdentifier(
+		ctx, s.ID(), identity.OIDCUniqueID(provider.Config().ID, claims.Subject),
+	)
 	if err != nil {
 		if errors.Is(err, sqlcon.ErrNoRows) {
 			var verdict ConflictingIdentityVerdict
@@ -208,17 +213,20 @@ func (s *Strategy) ProcessLogin(ctx context.Context, w http.ResponseWriter, r *h
 					return nil, s.HandleError(ctx, w, r, loginFlow, provider.Config().ID, nil, err)
 				}
 
-				registrationFlow.OrganizationID = loginFlow.OrganizationID
-				registrationFlow.IDToken = loginFlow.IDToken
-				registrationFlow.RawIDTokenNonce = loginFlow.RawIDTokenNonce
-				registrationFlow.TransientPayload = loginFlow.TransientPayload
-				registrationFlow.Active = s.ID()
-				registrationFlow.IdentitySchema = loginFlow.IdentitySchema
+			registrationFlow.OrganizationID = loginFlow.OrganizationID
+			registrationFlow.IDToken = loginFlow.IDToken
+			registrationFlow.RawIDTokenNonce = loginFlow.RawIDTokenNonce
+			registrationFlow.TransientPayload = loginFlow.TransientPayload
+			registrationFlow.Active = s.ID()
+			registrationFlow.IdentitySchema = loginFlow.IdentitySchema
 
-				// We are converting the flow here, but want to retain the original request URL.
-				registrationFlow.RequestURL = loginFlow.RequestURL
 
-				if _, err := s.processRegistration(ctx, w, r, registrationFlow, token, claims, provider, container); err != nil {
+			// We are converting the flow here, but want to retain the original request URL.
+			registrationFlow.RequestURL = loginFlow.RequestURL
+
+			if _, err := s.processRegistration(
+				ctx, w, r, registrationFlow, token, claims, provider, container,
+			); err != nil {
 					return registrationFlow, err
 				}
 
@@ -244,21 +252,50 @@ func (s *Strategy) ProcessLogin(ctx context.Context, w http.ResponseWriter, r *h
 	}
 
 	sess := session.NewInactiveSession()
-	sess.CompletedLoginForWithProvider(s.ID(), identity.AuthenticatorAssuranceLevel1, provider.Config().ID, provider.Config().OrganizationID)
+	sess.CompletedLoginForWithProvider(
+		s.ID(), identity.AuthenticatorAssuranceLevel1, provider.Config().ID, provider.Config().OrganizationID,
+	)
 
-	for _, c := range oidcCredentials.Providers {
-		if c.Subject == claims.Subject && c.Provider == provider.Config().ID {
-			if err = s.d.LoginHookExecutor().PostLoginHook(w, r, node.OpenIDConnectGroup, loginFlow, i, sess, provider.Config().ID); err != nil {
-				return nil, x.WrapWithIdentityIDError(s.HandleError(ctx, w, r, loginFlow, provider.Config().ID, nil, err), i.ID)
-			}
-			return nil, nil
+	pos, found := oidcCredentials.GetProvider(provider.Config().ID, claims.Subject)
+	if found {
+		return nil, s.HandleError(
+			ctx, w, r, loginFlow, provider.Config().ID, nil, errors.WithStack(
+				herodot.ErrInternalServerError.WithReason("Unable to find matching OpenID Connect Credentials.").WithDebugf(
+					`Unable to find credentials that match the given provider "%s" and subject "%s".`,
+					provider.Config().ID, claims.Subject,
+				),
+			),
+		)
+	}
+
+	if err = s.d.LoginHookExecutor().PostLoginHook(
+		w, r, node.OpenIDConnectGroup, loginFlow, i, sess, provider.Config().ID,
+	); err != nil {
+		return nil, x.WrapWithIdentityIDError(s.HandleError(ctx, w, r, loginFlow, provider.Config().ID, nil, err), i.ID)
+	}
+	{
+		if err := errors.WithStack(json.NewDecoder(bytes.NewBuffer(c.Config)).Decode(c)); err != nil {
+			return nil, s.HandleError(ctx, w, r, loginFlow, provider.Config().ID, nil, err)
 		}
+		var toUpdateConfig = oidcCredentials
+		toUpdateConfig.Providers[pos].LastIDToken = token.GetIDToken()
+		toUpdateConfig.Providers[pos].LastAccessToken = token.GetAccessToken()
+		toUpdateConfig.Providers[pos].LastRefreshToken = token.GetRefreshToken()
+		c.Config, err = json.Marshal(toUpdateConfig)
+		if err != nil {
+			return nil, s.HandleError(ctx, w, r, loginFlow, provider.Config().ID, nil, err)
+		}
+		i.SetCredentials(identity.CredentialsTypeOIDC, *c)
+		err = s.d.PrivilegedIdentityPool().UpdateIdentity(r.Context(), i)
+		return nil, s.HandleError(ctx, w, r, loginFlow, provider.Config().ID, nil, err)
 	}
 
 	return nil, s.HandleError(ctx, w, r, loginFlow, provider.Config().ID, nil, x.WrapWithIdentityIDError(errors.WithStack(herodot.ErrInternalServerError.WithReason("Unable to find matching OpenID Connect credentials.").WithDebugf(`Unable to find credentials that match the given provider "%s" and subject "%s".`, provider.Config().ID, claims.Subject)), i.ID))
 }
 
-func (s *Strategy) Login(w http.ResponseWriter, r *http.Request, f *login.Flow, _ *session.Session) (i *identity.Identity, err error) {
+func (s *Strategy) Login(
+	w http.ResponseWriter, r *http.Request, f *login.Flow, _ *session.Session,
+) (i *identity.Identity, err error) {
 	ctx, span := s.d.Tracer(r.Context()).Tracer().Start(r.Context(), "selfservice.strategy.oidc.Strategy.Login")
 	defer otelx.End(span, &err)
 
@@ -436,8 +473,12 @@ func (s *Strategy) removeProviders(conf *ConfigurationCollection, f *login.Flow)
 	}
 }
 
-func (s *Strategy) PopulateLoginMethodIdentifierFirstCredentials(r *http.Request, f *login.Flow, mods ...login.FormHydratorModifier) (err error) {
-	ctx, span := s.d.Tracer(r.Context()).Tracer().Start(r.Context(), "selfservice.strategy.oidc.Strategy.PopulateLoginMethodIdentifierFirstCredentials")
+func (s *Strategy) PopulateLoginMethodIdentifierFirstCredentials(
+	r *http.Request, f *login.Flow, mods ...login.FormHydratorModifier,
+) (err error) {
+	ctx, span := s.d.Tracer(r.Context()).Tracer().Start(
+		r.Context(), "selfservice.strategy.oidc.Strategy.PopulateLoginMethodIdentifierFirstCredentials",
+	)
 	defer otelx.End(span, &err)
 
 	conf, err := s.Config(ctx)
