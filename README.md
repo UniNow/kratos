@@ -1,3 +1,10 @@
+# UniNow Build
+
+```
+docker buildx build --platform linux/arm64,linux/amd64 --push -f .docker/Dockerfile-build . -t ghcr.io/uninow/kratos:v1.3.1-ADDYOURVERSIONADDITIONHERE
+```
+
+
 <h1 align="center"><img src="https://raw.githubusercontent.com/ory/meta/master/static/banners/kratos.svg" alt="Ory Kratos - Cloud native Identity and User Management"></h1>
 
 <h4 align="center">
