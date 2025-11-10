@@ -19,6 +19,8 @@ import (
 	"github.com/ory/x/stringsx"
 )
 
+var _ OAuth2Provider = (*ProviderDiscord)(nil)
+
 type ProviderDiscord struct {
 	config *Configuration
 	reg    Dependencies
@@ -81,7 +83,7 @@ func (d *ProviderDiscord) Claims(ctx context.Context, exchange *oauth2.Token, qu
 
 	user, err := dg.User("@me")
 	if err != nil {
-		return nil, errors.WithStack(herodot.ErrInternalServerError.WithReasonf("%s", err))
+		return nil, errors.WithStack(herodot.ErrUpstreamError.WithWrap(err).WithReasonf("%s", err))
 	}
 
 	claims := &Claims{

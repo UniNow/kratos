@@ -9,16 +9,9 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/ory/x/otelx"
-
-	"github.com/julienschmidt/httprouter"
 	"github.com/pkg/errors"
 
 	"github.com/ory/herodot"
-	"github.com/ory/nosurf"
-	"github.com/ory/x/sqlcon"
-	"github.com/ory/x/urlx"
-
 	"github.com/ory/kratos/continuity"
 	"github.com/ory/kratos/driver/config"
 	"github.com/ory/kratos/identity"
@@ -30,6 +23,12 @@ import (
 	"github.com/ory/kratos/text"
 	"github.com/ory/kratos/ui/node"
 	"github.com/ory/kratos/x"
+	"github.com/ory/kratos/x/nosurfx"
+	"github.com/ory/kratos/x/redir"
+	"github.com/ory/nosurf"
+	"github.com/ory/x/otelx"
+	"github.com/ory/x/sqlcon"
+	"github.com/ory/x/urlx"
 )
 
 const (
@@ -48,7 +47,7 @@ func ContinuityKey(id string) string {
 
 type (
 	handlerDependencies interface {
-		x.CSRFProvider
+		nosurfx.CSRFProvider
 		x.WriterProvider
 		x.LoggingProvider
 		x.TracingProvider
@@ -70,7 +69,7 @@ type (
 		FlowPersistenceProvider
 		StrategyProvider
 		HookExecutorProvider
-		x.CSRFTokenGeneratorProvider
+		nosurfx.CSRFTokenGeneratorProvider
 
 		schema.IdentitySchemaProvider
 
@@ -81,7 +80,7 @@ type (
 	}
 	Handler struct {
 		d    handlerDependencies
-		csrf x.CSRFToken
+		csrf nosurfx.CSRFToken
 	}
 )
 
@@ -93,12 +92,12 @@ func (h *Handler) RegisterPublicRoutes(public *x.RouterPublic) {
 	h.d.CSRFHandler().IgnorePath(RouteInitAPIFlow)
 	h.d.CSRFHandler().IgnorePath(RouteSubmitFlow)
 
-	public.GET(RouteInitBrowserFlow, h.d.SessionHandler().IsAuthenticated(h.createBrowserSettingsFlow, func(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
+	public.GET(RouteInitBrowserFlow, h.d.SessionHandler().IsAuthenticated(h.createBrowserSettingsFlow, func(w http.ResponseWriter, r *http.Request) {
 		if x.IsJSONRequest(r) {
 			h.d.Writer().WriteError(w, r, session.NewErrNoActiveSessionFound())
 		} else {
 			loginFlowUrl := h.d.Config().SelfPublicURL(r.Context()).JoinPath(login.RouteInitBrowserFlow).String()
-			redirectUrl, err := x.TakeOverReturnToParameter(r.URL.String(), loginFlowUrl)
+			redirectUrl, err := redir.TakeOverReturnToParameter(r.URL.String(), loginFlowUrl)
 			if err != nil {
 				http.Redirect(w, r, h.d.Config().SelfServiceFlowLoginUI(r.Context()).String(), http.StatusSeeOther)
 			} else {
@@ -115,13 +114,13 @@ func (h *Handler) RegisterPublicRoutes(public *x.RouterPublic) {
 }
 
 func (h *Handler) RegisterAdminRoutes(admin *x.RouterAdmin) {
-	admin.GET(RouteInitBrowserFlow, x.RedirectToPublicRoute(h.d))
+	admin.GET(RouteInitBrowserFlow, redir.RedirectToPublicRoute(h.d))
 
-	admin.GET(RouteInitAPIFlow, x.RedirectToPublicRoute(h.d))
-	admin.GET(RouteGetFlow, x.RedirectToPublicRoute(h.d))
+	admin.GET(RouteInitAPIFlow, redir.RedirectToPublicRoute(h.d))
+	admin.GET(RouteGetFlow, redir.RedirectToPublicRoute(h.d))
 
-	admin.POST(RouteSubmitFlow, x.RedirectToPublicRoute(h.d))
-	admin.GET(RouteSubmitFlow, x.RedirectToPublicRoute(h.d))
+	admin.POST(RouteSubmitFlow, redir.RedirectToPublicRoute(h.d))
+	admin.GET(RouteSubmitFlow, redir.RedirectToPublicRoute(h.d))
 }
 
 func (h *Handler) NewFlow(ctx context.Context, w http.ResponseWriter, r *http.Request, i *identity.Identity, ft flow.Type) (_ *Flow, err error) {
@@ -147,7 +146,7 @@ func (h *Handler) NewFlow(ctx context.Context, w http.ResponseWriter, r *http.Re
 		}
 	}
 
-	ds, err := h.d.Config().DefaultIdentityTraitsSchemaURL(ctx)
+	ds, err := h.d.Config().IdentityTraitsSchemaURL(ctx, i.SchemaID)
 	if err != nil {
 		return nil, err
 	}
@@ -219,7 +218,7 @@ type createNativeSettingsFlow struct {
 //		  200: settingsFlow
 //		  400: errorGeneric
 //		  default: errorGeneric
-func (h *Handler) createNativeSettingsFlow(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+func (h *Handler) createNativeSettingsFlow(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	s, err := h.d.SessionManager().FetchFromRequestContext(ctx, r)
 	if err != nil {
@@ -303,7 +302,7 @@ type createBrowserSettingsFlow struct {
 //	  401: errorGeneric
 //	  403: errorGeneric
 //	  default: errorGeneric
-func (h *Handler) createBrowserSettingsFlow(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+func (h *Handler) createBrowserSettingsFlow(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	s, err := h.d.SessionManager().FetchFromRequestContext(ctx, r)
 	if err != nil {
@@ -329,7 +328,7 @@ func (h *Handler) createBrowserSettingsFlow(w http.ResponseWriter, r *http.Reque
 	}
 
 	redirTo := f.AppendTo(h.d.Config().SelfServiceFlowSettingsUI(ctx)).String()
-	x.AcceptToRedirectOrJSON(w, r, h.d.Writer(), f, redirTo)
+	x.SendFlowCompletedAsRedirectOrJSON(w, r, h.d.Writer(), f, redirTo)
 }
 
 // Get Settings Flow
@@ -402,7 +401,7 @@ type getSettingsFlow struct {
 //	  404: errorGeneric
 //	  410: errorGeneric
 //	  default: errorGeneric
-func (h *Handler) getSettingsFlow(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+func (h *Handler) getSettingsFlow(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	rid := x.ParseUUID(r.URL.Query().Get("id"))
 	pr, err := h.d.SettingsFlowPersister().GetSettingsFlow(ctx, rid)
@@ -437,13 +436,13 @@ func (h *Handler) getSettingsFlow(w http.ResponseWriter, r *http.Request, _ http
 		if pr.Type == flow.TypeBrowser {
 			redirectURL := flow.GetFlowExpiredRedirectURL(ctx, h.d.Config(), RouteInitBrowserFlow, pr.ReturnTo)
 
-			h.d.Writer().WriteError(w, r, errors.WithStack(x.ErrGone.
+			h.d.Writer().WriteError(w, r, errors.WithStack(nosurfx.ErrGone.
 				WithReason("The settings flow has expired. Redirect the user to the settings flow init endpoint to initialize a new settings flow.").
 				WithDetail("redirect_to", redirectURL.String()).
 				WithDetail("return_to", pr.ReturnTo)))
 			return
 		}
-		h.d.Writer().WriteError(w, r, errors.WithStack(x.ErrGone.
+		h.d.Writer().WriteError(w, r, errors.WithStack(nosurfx.ErrGone.
 			WithReason("The settings flow has expired. Call the settings flow init API endpoint to initialize a new settings flow.").
 			WithDetail("api", urlx.AppendPaths(h.d.Config().SelfPublicURL(ctx), RouteInitAPIFlow).String())))
 		return
@@ -564,7 +563,7 @@ type updateSettingsFlowBody struct{}
 //	  410: errorGeneric
 //	  422: errorBrowserLocationChangeRequired
 //	  default: errorGeneric
-func (h *Handler) updateSettingsFlow(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
+func (h *Handler) updateSettingsFlow(w http.ResponseWriter, r *http.Request) {
 	var (
 		err error
 		ctx = r.Context()

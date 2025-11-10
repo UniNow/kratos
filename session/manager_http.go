@@ -9,6 +9,9 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/ory/kratos/x/nosurfx"
+	"github.com/ory/kratos/x/redir"
+
 	"go.opentelemetry.io/otel/attribute"
 
 	"go.opentelemetry.io/otel/trace"
@@ -50,7 +53,7 @@ type (
 		identity.ManagementProvider
 		x.CookieProvider
 		x.LoggingProvider
-		x.CSRFProvider
+		nosurfx.CSRFProvider
 		x.TracingProvider
 		x.TransactionPersistenceProvider
 		PersistenceProvider
@@ -313,12 +316,17 @@ func (s *ManagerHTTP) DoesSessionSatisfy(ctx context.Context, sess *Session, req
 		o(managerOpts)
 	}
 
-	loginURL := urlx.CopyWithQuery(urlx.AppendPaths(s.r.Config().SelfPublicURL(ctx), "/self-service/login/browser"), url.Values{"aal": {"aal2"}})
+	loginURL := urlx.AppendPaths(s.r.Config().SelfPublicURL(ctx), "/self-service/login/browser")
+	query := url.Values{
+		"aal": {"aal2"},
+	}
 
 	// return to the requestURL if it was set
 	if managerOpts.requestURL != "" {
-		loginURL = urlx.CopyWithQuery(loginURL, url.Values{"return_to": {managerOpts.requestURL}})
+		query.Set("return_to", managerOpts.requestURL)
 	}
+
+	loginURL.RawQuery = query.Encode()
 
 	switch requestedAAL {
 	case string(identity.AuthenticatorAssuranceLevel1):
@@ -424,7 +432,7 @@ func (s *ManagerHTTP) MaybeRedirectAPICodeFlow(w http.ResponseWriter, r *http.Re
 
 	returnTo := s.r.Config().SelfServiceBrowserDefaultReturnTo(ctx)
 	if redirecter, ok := f.(flow.FlowWithRedirect); ok {
-		r, err := x.SecureRedirectTo(r, returnTo, redirecter.SecureRedirectToOpts(ctx, s.r)...)
+		r, err := redir.SecureRedirectTo(r, returnTo, redirecter.SecureRedirectToOpts(ctx, s.r)...)
 		if err == nil {
 			returnTo = r
 		}

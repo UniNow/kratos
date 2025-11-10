@@ -8,7 +8,10 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"reflect"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/pkg/errors"
@@ -93,6 +96,7 @@ const (
 	CredentialsTypeCodeAuth CredentialsType = "code"
 	CredentialsTypePasskey  CredentialsType = "passkey"
 	CredentialsTypeProfile  CredentialsType = "profile"
+	CredentialsTypeSAML     CredentialsType = "saml"
 )
 
 func (c CredentialsType) String() string {
@@ -103,7 +107,7 @@ func (c CredentialsType) ToUiNodeGroup() node.UiNodeGroup {
 	switch c {
 	case CredentialsTypePassword:
 		return node.PasswordGroup
-	case CredentialsTypeOIDC:
+	case CredentialsTypeOIDC, CredentialsTypeSAML:
 		return node.OpenIDConnectGroup
 	case CredentialsTypeTOTP:
 		return node.TOTPGroup
@@ -123,6 +127,7 @@ func (c CredentialsType) ToUiNodeGroup() node.UiNodeGroup {
 var AllCredentialTypes = []CredentialsType{
 	CredentialsTypePassword,
 	CredentialsTypeOIDC,
+	// CredentialsTypeSAML, placeholder for the OEL version
 	CredentialsTypeTOTP,
 	CredentialsTypeLookup,
 	CredentialsTypeWebAuthn,
@@ -139,20 +144,18 @@ const (
 
 // ParseCredentialsType parses a string into a CredentialsType or returns false as the second argument.
 func ParseCredentialsType(in string) (CredentialsType, bool) {
-	for _, t := range []CredentialsType{
-		CredentialsTypePassword,
+	switch t := CredentialsType(in); t {
+	case CredentialsTypePassword,
 		CredentialsTypeOIDC,
+		CredentialsTypeSAML,
 		CredentialsTypeTOTP,
 		CredentialsTypeLookup,
 		CredentialsTypeWebAuthn,
 		CredentialsTypeCodeAuth,
 		CredentialsTypeRecoveryLink,
 		CredentialsTypeRecoveryCode,
-		CredentialsTypePasskey,
-	} {
-		if t.String() == in {
-			return t, true
-		}
+		CredentialsTypePasskey:
+		return t, true
 	}
 	return "", false
 }
@@ -197,6 +200,23 @@ func (c Credentials) GetID() uuid.UUID {
 
 func (c Credentials) UnmarshalConfig(target interface{}) error {
 	return errors.WithStack(json.NewDecoder(bytes.NewBuffer(c.Config)).Decode(&target))
+}
+
+// Signature returns a unique string signature for the credential.
+func (c Credentials) Signature() string {
+	sortedIdentifiers := slices.Clone(c.Identifiers)
+	slices.Sort(sortedIdentifiers)
+	identifiersStr := strings.Join(sortedIdentifiers, ",")
+
+	// Normalize JSON config to remove whitespace and key ordering differences
+	var normalizedConfig any
+	if len(c.Config) > 0 {
+		if err := json.Unmarshal(c.Config, &normalizedConfig); err != nil {
+			// there is not much we can do when unmarshal fails except use the raw value
+			normalizedConfig = c.Config
+		}
+	}
+	return fmt.Sprintf("%v|%v|%d|%+v|%v|%v", c.Type, identifiersStr, c.Version, normalizedConfig, c.IdentityID, c.NID)
 }
 
 type (

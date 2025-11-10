@@ -45,7 +45,8 @@ func (s *Strategy) RegisterSettingsRoutes(_ *x.RouterPublic) {}
 func (s *Strategy) SettingsStrategyID() string { return s.ID().String() }
 
 const (
-	InternalContextKeySessionData = "session_data"
+	InternalContextKeySessionData    = "session_data"
+	InternalContextKeySessionOptions = "session_options"
 )
 
 func (s *Strategy) PopulateSettingsMethod(ctx context.Context, r *http.Request, id *identity.Identity, f *settings.Flow) (err error) {
@@ -163,7 +164,7 @@ func (s *Strategy) identityListWebAuthn(id *identity.Identity) (*identity.Creden
 }
 
 func (s *Strategy) Settings(ctx context.Context, w http.ResponseWriter, r *http.Request, f *settings.Flow, ss *session.Session) (_ *settings.UpdateContext, err error) {
-	ctx, span := s.d.Tracer(ctx).Tracer().Start(ctx, "selfservice.strategy.passkey.strategy.Settings")
+	ctx, span := s.d.Tracer(ctx).Tracer().Start(ctx, "selfservice.strategy.passkey.Strategy.Settings")
 	defer otelx.End(span, &err)
 
 	if f.Type != flow.TypeBrowser {

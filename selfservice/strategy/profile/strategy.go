@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/ory/kratos/x/nosurfx"
+
 	"github.com/ory/x/otelx"
 
 	"github.com/ory/jsonschema/v3"
@@ -38,8 +40,8 @@ var _ settings.Strategy = new(Strategy)
 
 type (
 	strategyDependencies interface {
-		x.CSRFProvider
-		x.CSRFTokenGeneratorProvider
+		nosurfx.CSRFProvider
+		nosurfx.CSRFTokenGeneratorProvider
 		x.WriterProvider
 		x.LoggingProvider
 		x.TracingProvider
@@ -64,6 +66,7 @@ type (
 		settings.HooksProvider
 
 		registration.FlowPersistenceProvider
+		registration.StrategyProvider
 
 		schema.IdentitySchemaProvider
 	}
@@ -73,8 +76,8 @@ type (
 	}
 )
 
-func NewStrategy(d any) *Strategy {
-	return &Strategy{d: d.(strategyDependencies), dc: decoderx.NewHTTP()}
+func NewStrategy(d strategyDependencies) *Strategy {
+	return &Strategy{d: d, dc: decoderx.NewHTTP()}
 }
 
 func (s *Strategy) SettingsStrategyID() string {
@@ -116,7 +119,7 @@ func (s *Strategy) PopulateSettingsMethod(ctx context.Context, r *http.Request, 
 }
 
 func (s *Strategy) Settings(ctx context.Context, w http.ResponseWriter, r *http.Request, f *settings.Flow, ss *session.Session) (_ *settings.UpdateContext, err error) {
-	ctx, span := s.d.Tracer(ctx).Tracer().Start(ctx, "selfservice.strategy.profile.strategy.Settings")
+	ctx, span := s.d.Tracer(ctx).Tracer().Start(ctx, "selfservice.strategy.profile.Strategy.Settings")
 	defer otelx.End(span, &err)
 
 	var p updateSettingsFlowWithProfileMethod
@@ -299,4 +302,19 @@ func (s *Strategy) newSettingsProfileDecoder(ctx context.Context, i *identity.Id
 
 func (s *Strategy) NodeGroup() node.UiNodeGroup {
 	return node.ProfileGroup
+}
+
+// SortForHydration sorts the strategies so that the profile strategy is always first.
+func SortForHydration(strats registration.Strategies) registration.Strategies {
+	sorted := make(registration.Strategies, len(strats))
+	copy(sorted, strats)
+
+	for i, strat := range sorted {
+		if strat.ID() == identity.CredentialsTypeProfile {
+			sorted = append([]registration.Strategy{strat}, append(sorted[:i], sorted[i+1:]...)...)
+			break
+		}
+	}
+
+	return sorted
 }

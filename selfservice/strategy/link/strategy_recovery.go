@@ -10,18 +10,14 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/ory/kratos/x/redir"
+
 	"github.com/gofrs/uuid"
-	"github.com/julienschmidt/httprouter"
 	"github.com/pkg/errors"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/ory/herodot"
-	"github.com/ory/x/decoderx"
-	"github.com/ory/x/otelx"
-	"github.com/ory/x/sqlcon"
-	"github.com/ory/x/sqlxx"
-	"github.com/ory/x/urlx"
-
 	"github.com/ory/kratos/identity"
 	"github.com/ory/kratos/schema"
 	"github.com/ory/kratos/selfservice/flow"
@@ -31,6 +27,14 @@ import (
 	"github.com/ory/kratos/text"
 	"github.com/ory/kratos/ui/node"
 	"github.com/ory/kratos/x"
+	"github.com/ory/kratos/x/events"
+	"github.com/ory/pop/v6"
+	"github.com/ory/x/decoderx"
+	"github.com/ory/x/otelx"
+	"github.com/ory/x/pointerx"
+	"github.com/ory/x/sqlcon"
+	"github.com/ory/x/sqlxx"
+	"github.com/ory/x/urlx"
 )
 
 const (
@@ -43,7 +47,7 @@ func (s *Strategy) RecoveryStrategyID() string {
 
 func (s *Strategy) RegisterPublicRecoveryRoutes(public *x.RouterPublic) {
 	s.d.CSRFHandler().IgnorePath(RouteAdminCreateRecoveryLink)
-	public.POST(RouteAdminCreateRecoveryLink, x.RedirectToAdminRoute(s.d))
+	public.POST(RouteAdminCreateRecoveryLink, redir.RedirectToAdminRoute(s.d))
 }
 
 func (s *Strategy) RegisterAdminRecoveryRoutes(admin *x.RouterAdmin) {
@@ -143,14 +147,16 @@ type recoveryLinkForIdentity struct {
 //	  400: errorGeneric
 //	  404: errorGeneric
 //	  default: errorGeneric
-func (s *Strategy) createRecoveryLinkForIdentity(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+func (s *Strategy) createRecoveryLinkForIdentity(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
 	var p createRecoveryLinkForIdentityBody
 	if err := s.dx.Decode(r, &p, decoderx.HTTPJSONDecoder()); err != nil {
 		s.d.Writer().WriteError(w, r, err)
 		return
 	}
 
-	expiresIn := s.d.Config().SelfServiceLinkMethodLifespan(r.Context())
+	expiresIn := s.d.Config().SelfServiceLinkMethodLifespan(ctx)
 	if len(p.ExpiresIn) > 0 {
 		var err error
 		expiresIn, err = time.ParseDuration(p.ExpiresIn)
@@ -171,12 +177,7 @@ func (s *Strategy) createRecoveryLinkForIdentity(w http.ResponseWriter, r *http.
 		return
 	}
 
-	if err := s.d.RecoveryFlowPersister().CreateRecoveryFlow(r.Context(), req); err != nil {
-		s.d.Writer().WriteError(w, r, err)
-		return
-	}
-
-	id, err := s.d.IdentityPool().GetIdentity(r.Context(), p.IdentityID, identity.ExpandDefault)
+	id, err := s.d.IdentityPool().GetIdentity(ctx, p.IdentityID, identity.ExpandDefault)
 	if errors.Is(err, sqlcon.ErrNoRows) {
 		s.d.Writer().WriteError(w, r, errors.WithStack(herodot.ErrBadRequest.WithReasonf("The requested identity id does not exist.").WithWrap(err)))
 		return
@@ -186,10 +187,20 @@ func (s *Strategy) createRecoveryLinkForIdentity(w http.ResponseWriter, r *http.
 	}
 
 	token := NewAdminRecoveryToken(id.ID, req.ID, expiresIn)
-	if err := s.d.RecoveryTokenPersister().CreateRecoveryToken(r.Context(), token); err != nil {
+	if err := s.d.TransactionalPersisterProvider().Transaction(ctx, func(ctx context.Context, c *pop.Connection) error {
+		if err := s.d.RecoveryFlowPersister().CreateRecoveryFlow(ctx, req); err != nil {
+			return err
+		}
+
+		return s.d.RecoveryTokenPersister().CreateRecoveryToken(ctx, token)
+	}); err != nil {
 		s.d.Writer().WriteError(w, r, err)
 		return
 	}
+
+	trace.SpanFromContext(ctx).AddEvent(
+		events.NewRecoveryInitiatedByAdmin(ctx, req.ID, id.ID, req.Type.String(), "link"),
+	)
 
 	s.d.Audit().
 		WithField("identity_id", id.ID).
@@ -199,7 +210,7 @@ func (s *Strategy) createRecoveryLinkForIdentity(w http.ResponseWriter, r *http.
 	s.d.Writer().Write(w, r, &recoveryLinkForIdentity{
 		ExpiresAt: req.ExpiresAt.UTC(),
 		RecoveryLink: urlx.CopyWithQuery(
-			urlx.AppendPaths(s.d.Config().SelfPublicURL(r.Context()), recovery.RouteSubmitFlow),
+			urlx.AppendPaths(s.d.Config().SelfPublicURL(ctx), recovery.RouteSubmitFlow),
 			url.Values{
 				"token": {token.Token},
 				"flow":  {req.ID.String()},
@@ -263,9 +274,9 @@ func (s *Strategy) Recover(w http.ResponseWriter, r *http.Request, f *recovery.F
 
 	if _, err := s.d.SessionManager().FetchFromRequest(r.Context(), r); err == nil {
 		if x.IsJSONRequest(r) {
-			session.RespondWithJSONErrorOnAuthenticated(s.d.Writer(), recovery.ErrAlreadyLoggedIn)(w, r, nil)
+			session.RespondWithJSONErrorOnAuthenticated(s.d.Writer(), recovery.ErrAlreadyLoggedIn)(w, r)
 		} else {
-			session.RedirectOnAuthenticated(s.d)(w, r, nil)
+			session.RedirectOnAuthenticated(s.d)(w, r)
 		}
 		return errors.WithStack(flow.ErrCompletedByStrategy)
 	}
@@ -313,16 +324,16 @@ func (s *Strategy) recoveryIssueSession(ctx context.Context, w http.ResponseWrit
 		return s.retryRecoveryFlowWithError(w, r, flow.TypeBrowser, err)
 	}
 
+	// Force load.
+	if err := s.d.PrivilegedIdentityPool().HydrateIdentityAssociations(ctx, sess.Identity, identity.ExpandEverything); err != nil {
+		return s.retryRecoveryFlowWithError(w, r, flow.TypeBrowser, err)
+	}
+
 	if err := s.d.RecoveryExecutor().PostRecoveryHook(w, r, f, sess); err != nil {
 		return s.retryRecoveryFlowWithError(w, r, flow.TypeBrowser, err)
 	}
 
 	if err := s.d.SessionManager().UpsertAndIssueCookie(r.Context(), w, r, sess); err != nil {
-		return s.retryRecoveryFlowWithError(w, r, flow.TypeBrowser, err)
-	}
-
-	// Force load.
-	if err := s.d.PrivilegedIdentityPool().HydrateIdentityAssociations(ctx, sess.Identity, identity.ExpandEverything); err != nil {
 		return s.retryRecoveryFlowWithError(w, r, flow.TypeBrowser, err)
 	}
 
@@ -337,7 +348,7 @@ func (s *Strategy) recoveryIssueSession(ctx context.Context, w http.ResponseWrit
 		returnTo = returnToURL.String()
 	}
 
-	sf.RequestURL, err = x.TakeOverReturnToParameter(f.RequestURL, sf.RequestURL, returnTo)
+	sf.RequestURL, err = redir.TakeOverReturnToParameter(f.RequestURL, sf.RequestURL, returnTo)
 	if err != nil {
 		return s.retryRecoveryFlowWithError(w, r, flow.TypeBrowser, err)
 	}
@@ -489,22 +500,14 @@ func (s *Strategy) recoveryHandleFormSubmission(w http.ResponseWriter, r *http.R
 }
 
 func (s *Strategy) markRecoveryAddressVerified(w http.ResponseWriter, r *http.Request, f *recovery.Flow, id *identity.Identity, recoveryAddress *identity.RecoveryAddress) error {
-	var address *identity.VerifiableAddress
-	for idx := range id.VerifiableAddresses {
-		va := id.VerifiableAddresses[idx]
-		if va.Value == recoveryAddress.Value {
-			address = &va
-			break
-		}
-	}
-
-	if address != nil && !address.Verified { // can it be that the address is nil?
-		address.Verified = true
-		verifiedAt := sqlxx.NullTime(time.Now().UTC())
-		address.VerifiedAt = &verifiedAt
-		address.Status = identity.VerifiableAddressStatusCompleted
-		if err := s.d.PrivilegedIdentityPool().UpdateVerifiableAddress(r.Context(), address); err != nil {
-			return s.HandleRecoveryError(w, r, f, nil, err)
+	for k, v := range id.VerifiableAddresses {
+		if v.Value == recoveryAddress.Value {
+			id.VerifiableAddresses[k].Verified = true
+			id.VerifiableAddresses[k].VerifiedAt = pointerx.Ptr(sqlxx.NullTime(time.Now().UTC()))
+			id.VerifiableAddresses[k].Status = identity.VerifiableAddressStatusCompleted
+			if err := s.d.PrivilegedIdentityPool().UpdateVerifiableAddress(r.Context(), &id.VerifiableAddresses[k], "verified", "verified_at", "status"); err != nil {
+				return s.HandleRecoveryError(w, r, f, nil, err)
+			}
 		}
 	}
 

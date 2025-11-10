@@ -7,7 +7,6 @@ import (
 	"bufio"
 	"context"
 	"crypto/sha1" //#nosec G505 -- sha1 is used for k-anonymity
-	stderrs "errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -19,7 +18,7 @@ import (
 	"github.com/ory/kratos/text"
 
 	"github.com/arbovm/levenshtein"
-	"github.com/dgraph-io/ristretto"
+	"github.com/dgraph-io/ristretto/v2"
 	"github.com/hashicorp/go-retryablehttp"
 	"github.com/pkg/errors"
 
@@ -46,8 +45,8 @@ type ValidationProvider interface {
 
 var (
 	_                       Validator = new(DefaultPasswordValidator)
-	ErrNetworkFailure                 = stderrs.New("unable to check if password has been leaked because an unexpected network error occurred")
-	ErrUnexpectedStatusCode           = stderrs.New("unexpected status code")
+	ErrNetworkFailure                 = herodot.ErrUpstreamError.WithError("Leaked password server unavailable").WithReasonf("Unable to check if password has been leaked because an unexpected network error occurred")
+	ErrUnexpectedStatusCode           = herodot.ErrUpstreamError.WithError("Leaked password server unavailable").WithReasonf("Unexpected status code from haveibeenpwned.com")
 )
 
 // DefaultPasswordValidator implements Validator. It is based on best
@@ -92,7 +91,8 @@ func NewDefaultPasswordValidatorStrategy(reg validatorDependencies) (*DefaultPas
 			httpx.ResilientClientWithTracer(noop.NewTracerProvider().Tracer("github.com/ory/kratos/selfservice/strategy/password"))),
 		reg:                       reg,
 		hashes:                    cache,
-		minIdentifierPasswordDist: 5, maxIdentifierPasswordSubstrThreshold: 0.5}, nil
+		minIdentifierPasswordDist: 5, maxIdentifierPasswordSubstrThreshold: 0.5,
+	}, nil
 }
 
 func b20(src []byte) string {
@@ -132,7 +132,7 @@ func (s *DefaultPasswordValidator) fetch(ctx context.Context, hpw []byte, apiDNS
 	if err != nil {
 		return 0, errors.Wrapf(ErrNetworkFailure, "%s", err)
 	}
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 
 	if res.StatusCode != http.StatusOK {
 		return 0, errors.Wrapf(ErrUnexpectedStatusCode, "%d", res.StatusCode)
@@ -153,7 +153,7 @@ func (s *DefaultPasswordValidator) fetch(ctx context.Context, hpw []byte, apiDNS
 		if len(result) == 2 {
 			count, err = strconv.ParseInt(strings.ReplaceAll(result[1], ",", ""), 10, 64)
 			if err != nil {
-				return 0, errors.WithStack(herodot.ErrInternalServerError.WithReasonf("Expected password hash to contain a count formatted as int but got: %s", result[1]))
+				return 0, errors.WithStack(herodot.ErrUpstreamError.WithReasonf("Expected password hash to contain a count formatted as int but got: %s", result[1]))
 			}
 		}
 

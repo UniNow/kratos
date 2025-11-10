@@ -7,8 +7,11 @@ import (
 	"context"
 	"io/fs"
 
+	"github.com/ory/pop/v6"
+	"github.com/ory/x/configx"
+	"github.com/ory/x/servicelocatorx"
+
 	"github.com/gorilla/sessions"
-	"github.com/pkg/errors"
 
 	"github.com/ory/kratos/cipher"
 	"github.com/ory/kratos/continuity"
@@ -31,6 +34,7 @@ import (
 	password2 "github.com/ory/kratos/selfservice/strategy/password"
 	"github.com/ory/kratos/session"
 	"github.com/ory/kratos/x"
+	"github.com/ory/kratos/x/nosurfx"
 	"github.com/ory/nosurf"
 	"github.com/ory/x/contextx"
 	"github.com/ory/x/dbal"
@@ -47,11 +51,11 @@ type Registry interface {
 
 	Init(ctx context.Context, ctxer contextx.Contextualizer, opts ...RegistryOption) error
 
-	WithLogger(l *logrusx.Logger) Registry
-	WithJsonnetVMProvider(jsonnetsecure.VMProvider) Registry
+	SetLogger(l *logrusx.Logger)
+	SetJSONNetVMProvider(jsonnetsecure.VMProvider)
 
 	WithCSRFHandler(c nosurf.Handler)
-	WithCSRFTokenGenerator(cg x.CSRFToken)
+	WithCSRFTokenGenerator(cg nosurfx.CSRFToken)
 
 	MetricsHandler() *prometheus.Handler
 	HealthHandler(ctx context.Context) *healthx.Handler
@@ -67,10 +71,10 @@ type Registry interface {
 
 	config.Provider
 	CourierConfig() config.CourierConfigs
-	WithConfig(c *config.Config) Registry
-	WithContextualizer(ctxer contextx.Contextualizer) Registry
+	SetConfig(c *config.Config)
+	SetContextualizer(ctxer contextx.Contextualizer)
 
-	x.CSRFProvider
+	nosurfx.CSRFProvider
 	x.WriterProvider
 	x.LoggingProvider
 	x.HTTPClientProvider
@@ -151,33 +155,28 @@ type Registry interface {
 	recovery.HandlerProvider
 	recovery.StrategyProvider
 
-	x.CSRFTokenGeneratorProvider
+	nosurfx.CSRFTokenGeneratorProvider
 }
 
-func NewRegistryFromDSN(ctx context.Context, c *config.Config, l *logrusx.Logger) (Registry, error) {
-	driver, err := dbal.GetDriverFor(c.DSN(ctx))
-	if err != nil {
-		return nil, errors.WithStack(err)
-	}
-
-	registry, ok := driver.(Registry)
-	if !ok {
-		return nil, errors.Errorf("driver of type %T does not implement interface Registry", driver)
-	}
+func NewRegistryFromDSN(ctx context.Context, c *config.Config, l *logrusx.Logger) (*RegistryDefault, error) {
+	reg := NewRegistryDefault()
 
 	tracer, err := otelx.New("Ory Kratos", l, c.Tracing(ctx))
 	if err != nil {
 		l.WithError(err).Fatalf("failed to initialize tracer")
 		tracer = otelx.NewNoop(l, c.Tracing(ctx))
 	}
-	registry.SetTracer(tracer)
+	reg.SetTracer(tracer)
+	reg.SetLogger(l)
+	reg.SetConfig(c)
 
-	return registry.WithLogger(l).WithConfig(c), nil
+	return reg, nil
 }
 
 type options struct {
 	skipNetworkInit               bool
 	config                        *config.Config
+	configOptions                 []configx.OptionModifier
 	replaceTracer                 func(*otelx.Tracer) *otelx.Tracer
 	replaceIdentitySchemaProvider func(Registry) schema.IdentitySchemaProvider
 	inspect                       func(Registry) error
@@ -185,11 +184,22 @@ type options struct {
 	extraGoMigrations             popx.Migrations
 	replacementStrategies         []NewStrategy
 	extraHooks                    map[string]func(config.SelfServiceHook) any
+	extraHandlers                 []NewHandlerRegistrar
 	disableMigrationLogging       bool
 	jsonnetPool                   jsonnetsecure.Pool
+	serviceLocatorOptions         []servicelocatorx.Option
+	dbOpts                        []func(details *pop.ConnectionDetails)
 }
 
 type RegistryOption func(*options)
+
+// WithDBOptions adds database connection options that will be applied to the
+// underlying connection.
+func WithDBOptions(opts ...func(details *pop.ConnectionDetails)) RegistryOption {
+	return func(o *options) {
+		o.dbOpts = append(o.dbOpts, opts...)
+	}
+}
 
 func SkipNetworkInit(o *options) {
 	o.skipNetworkInit = true
@@ -204,6 +214,12 @@ func WithJsonnetPool(pool jsonnetsecure.Pool) RegistryOption {
 func WithConfig(config *config.Config) RegistryOption {
 	return func(o *options) {
 		o.config = config
+	}
+}
+
+func WithConfigOptions(opts ...configx.OptionModifier) RegistryOption {
+	return func(o *options) {
+		o.configOptions = append(o.configOptions, opts...)
 	}
 }
 
@@ -236,6 +252,14 @@ func WithExtraHooks(hooks map[string]func(config.SelfServiceHook) any) RegistryO
 	}
 }
 
+type NewHandlerRegistrar func(deps any) x.HandlerRegistrar
+
+func WithExtraHandlers(handlers ...NewHandlerRegistrar) RegistryOption {
+	return func(o *options) {
+		o.extraHandlers = handlers
+	}
+}
+
 func Inspect(f func(reg Registry) error) RegistryOption {
 	return func(o *options) {
 		o.inspect = f
@@ -257,6 +281,12 @@ func WithExtraGoMigrations(m ...popx.Migration) RegistryOption {
 func WithDisabledMigrationLogging() RegistryOption {
 	return func(o *options) {
 		o.disableMigrationLogging = true
+	}
+}
+
+func WithServiceLocatorOptions(opts ...servicelocatorx.Option) RegistryOption {
+	return func(o *options) {
+		o.serviceLocatorOptions = append(o.serviceLocatorOptions, opts...)
 	}
 }
 
