@@ -594,6 +594,13 @@
           "description": "Contains the orgin header to be used when exchanging a NetID FedCM token for an ID token",
           "type": "string",
           "examples": ["https://example.com"]
+        },
+        "capture_last_tokens": {
+          "title": "Capture Last Tokens",
+          "description": "Controls whether to capture and store the last tokens received during login. When enabled, the LastIDToken, LastAccessToken, and LastRefreshToken fields will be updated on each successful login.",
+          "type": "boolean",
+          "default": false,
+          "examples": [true, false]
         }
       },
       "additionalProperties": false,
