@@ -138,6 +138,11 @@ type Configuration struct {
 	// NetIDTokenOriginHeader contains the orgin header to be used when exchanging a
 	// NetID FedCM token for an ID token.
 	NetIDTokenOriginHeader string `json:"net_id_token_origin_header"`
+
+	// CaptureLastTokens controls whether to capture and store the last tokens received during login.
+	// When enabled, the LastIDToken, LastAccessToken, and LastRefreshToken fields will be updated
+	// on each successful login.
+	CaptureLastTokens bool `json:"capture_last_tokens"`
 }
 
 func (p Configuration) Redir(public *url.URL) string {

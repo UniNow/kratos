@@ -272,7 +272,9 @@ func (s *Strategy) ProcessLogin(
 	); err != nil {
 		return nil, x.WrapWithIdentityIDError(s.HandleError(ctx, w, r, loginFlow, provider.Config().ID, nil, err), i.ID)
 	}
-	{
+
+	// Update tokens if feature flag is enabled
+	if provider.Config().CaptureLastTokens {
 		if err := errors.WithStack(json.NewDecoder(bytes.NewBuffer(c.Config)).Decode(c)); err != nil {
 			return nil, s.HandleError(ctx, w, r, loginFlow, provider.Config().ID, nil, err)
 		}
@@ -286,8 +288,12 @@ func (s *Strategy) ProcessLogin(
 		}
 		i.SetCredentials(identity.CredentialsTypeOIDC, *c)
 		err = s.d.PrivilegedIdentityPool().UpdateIdentity(r.Context(), i)
-		return nil, s.HandleError(ctx, w, r, loginFlow, provider.Config().ID, nil, err)
+		if err != nil {
+			return nil, s.HandleError(ctx, w, r, loginFlow, provider.Config().ID, nil, err)
+		}
 	}
+
+	return nil, nil
 }
 
 func (s *Strategy) Login(
