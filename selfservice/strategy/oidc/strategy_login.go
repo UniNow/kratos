@@ -213,20 +213,19 @@ func (s *Strategy) ProcessLogin(
 					return nil, s.HandleError(ctx, w, r, loginFlow, provider.Config().ID, nil, err)
 				}
 
-			registrationFlow.OrganizationID = loginFlow.OrganizationID
-			registrationFlow.IDToken = loginFlow.IDToken
-			registrationFlow.RawIDTokenNonce = loginFlow.RawIDTokenNonce
-			registrationFlow.TransientPayload = loginFlow.TransientPayload
-			registrationFlow.Active = s.ID()
-			registrationFlow.IdentitySchema = loginFlow.IdentitySchema
+				registrationFlow.OrganizationID = loginFlow.OrganizationID
+				registrationFlow.IDToken = loginFlow.IDToken
+				registrationFlow.RawIDTokenNonce = loginFlow.RawIDTokenNonce
+				registrationFlow.TransientPayload = loginFlow.TransientPayload
+				registrationFlow.Active = s.ID()
+				registrationFlow.IdentitySchema = loginFlow.IdentitySchema
 
+				// We are converting the flow here, but want to retain the original request URL.
+				registrationFlow.RequestURL = loginFlow.RequestURL
 
-			// We are converting the flow here, but want to retain the original request URL.
-			registrationFlow.RequestURL = loginFlow.RequestURL
-
-			if _, err := s.processRegistration(
-				ctx, w, r, registrationFlow, token, claims, provider, container,
-			); err != nil {
+				if _, err := s.processRegistration(
+					ctx, w, r, registrationFlow, token, claims, provider, container,
+				); err != nil {
 					return registrationFlow, err
 				}
 
@@ -257,7 +256,7 @@ func (s *Strategy) ProcessLogin(
 	)
 
 	pos, found := oidcCredentials.GetProvider(provider.Config().ID, claims.Subject)
-	if found {
+	if !found {
 		return nil, s.HandleError(
 			ctx, w, r, loginFlow, provider.Config().ID, nil, errors.WithStack(
 				herodot.ErrInternalServerError.WithReason("Unable to find matching OpenID Connect Credentials.").WithDebugf(
@@ -289,8 +288,6 @@ func (s *Strategy) ProcessLogin(
 		err = s.d.PrivilegedIdentityPool().UpdateIdentity(r.Context(), i)
 		return nil, s.HandleError(ctx, w, r, loginFlow, provider.Config().ID, nil, err)
 	}
-
-	return nil, s.HandleError(ctx, w, r, loginFlow, provider.Config().ID, nil, x.WrapWithIdentityIDError(errors.WithStack(herodot.ErrInternalServerError.WithReason("Unable to find matching OpenID Connect credentials.").WithDebugf(`Unable to find credentials that match the given provider "%s" and subject "%s".`, provider.Config().ID, claims.Subject)), i.ID))
 }
 
 func (s *Strategy) Login(
