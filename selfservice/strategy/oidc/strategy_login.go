@@ -166,6 +166,7 @@ func (s *Strategy) ProcessLogin(
 	ctx, span := s.d.Tracer(ctx).Tracer().Start(ctx, "selfservice.strategy.oidc.Strategy.processLogin")
 	defer otelx.End(span, &err)
 
+	merge := false
 	i, c, err := s.d.PrivilegedIdentityPool().FindByCredentialsIdentifier(
 		ctx, s.ID(), identity.OIDCUniqueID(provider.Config().ID, claims.Subject),
 	)
@@ -173,6 +174,7 @@ func (s *Strategy) ProcessLogin(
 		if errors.Is(err, sqlcon.ErrNoRows) {
 			var verdict ConflictingIdentityVerdict
 			verdict, i, c, err = s.handleConflictingIdentity(ctx, w, r, loginFlow, token, claims, provider, container)
+			merge = true
 			switch verdict {
 			case ConflictingIdentityVerdictMerge:
 				// Do nothing
@@ -267,33 +269,35 @@ func (s *Strategy) ProcessLogin(
 		)
 	}
 
+	if !merge && provider.Config().CaptureLastTokens {
+		i, _, err = s.handleCapturingTokens(ctx, token, oidcCredentials, pos, c, i)
+		if err != nil {
+			return nil, s.HandleError(ctx, w, r, loginFlow, provider.Config().ID, nil, err)
+		}
+	}
+
 	if err = s.d.LoginHookExecutor().PostLoginHook(
 		w, r, node.OpenIDConnectGroup, loginFlow, i, sess, provider.Config().ID,
 	); err != nil {
 		return nil, x.WrapWithIdentityIDError(s.HandleError(ctx, w, r, loginFlow, provider.Config().ID, nil, err), i.ID)
 	}
 
-	// Update tokens if feature flag is enabled
-	if provider.Config().CaptureLastTokens {
-		if err := errors.WithStack(json.NewDecoder(bytes.NewBuffer(c.Config)).Decode(c)); err != nil {
-			return nil, s.HandleError(ctx, w, r, loginFlow, provider.Config().ID, nil, err)
-		}
-		var toUpdateConfig = oidcCredentials
-		toUpdateConfig.Providers[pos].LastIDToken = token.GetIDToken()
-		toUpdateConfig.Providers[pos].LastAccessToken = token.GetAccessToken()
-		toUpdateConfig.Providers[pos].LastRefreshToken = token.GetRefreshToken()
-		c.Config, err = json.Marshal(toUpdateConfig)
-		if err != nil {
-			return nil, s.HandleError(ctx, w, r, loginFlow, provider.Config().ID, nil, err)
-		}
-		i.SetCredentials(identity.CredentialsTypeOIDC, *c)
-		err = s.d.PrivilegedIdentityPool().UpdateIdentity(r.Context(), i)
-		if err != nil {
-			return nil, s.HandleError(ctx, w, r, loginFlow, provider.Config().ID, nil, err)
-		}
-	}
+	return nil, s.HandleError(ctx, w, r, loginFlow, provider.Config().ID, nil, errors.WithStack(herodot.ErrInternalServerError.WithReason("Unable to find matching OpenID Connect credentials.").WithDebugf(`Unable to find credentials that match the given provider "%s" and subject "%s".`, provider.Config().ID, claims.Subject)))
+}
 
-	return nil, nil
+func (s *Strategy) handleCapturingTokens(ctx context.Context, token *identity.CredentialsOIDCEncryptedTokens, oidcCredentials identity.CredentialsOIDC, index int, c *identity.Credentials, i *identity.Identity) (id *identity.Identity, credentials *identity.Credentials, err error) {
+	oidcCredentials.Providers[index].LastIDToken = token.GetIDToken()
+	oidcCredentials.Providers[index].LastAccessToken = token.GetAccessToken()
+	oidcCredentials.Providers[index].LastRefreshToken = token.GetRefreshToken()
+	c.Config, err = json.Marshal(oidcCredentials)
+	if err != nil {
+		return nil, nil, err
+	}
+	i.SetCredentials(identity.CredentialsTypeOIDC, *c)
+	if err = s.d.PrivilegedIdentityPool().UpdateIdentity(ctx, i); err != nil {
+		return nil, nil, err
+	}
+	return i, c, nil
 }
 
 func (s *Strategy) Login(
