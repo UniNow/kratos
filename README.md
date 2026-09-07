@@ -1,3 +1,18 @@
+# UniNow Build
+
+This fork carries UniNow-specific patches on top of an upstream Ory Kratos release tag.
+Build and push the multi-arch image (bump the suffix for every rebuild of the same upstream version):
+
+```
+VERSION=v26.2.0-1
+docker buildx build --platform linux/arm64,linux/amd64 --push \
+  -f .docker/Dockerfile-build \
+  --build-arg VERSION=$VERSION \
+  --build-arg COMMIT=$(git rev-parse --short HEAD) \
+  --build-arg BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+  -t ghcr.io/uninow/kratos:$VERSION .
+```
+
 <h1 align="center">
   <img src="https://raw.githubusercontent.com/ory/meta/master/static/banners/kratos.svg" alt="Ory Kratos - Cloud native identity and user management">
 </h1>
