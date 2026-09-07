@@ -1,10 +1,24 @@
 # UniNow Build
 
-This fork carries UniNow-specific patches on top of an upstream Ory Kratos release tag.
-Build and push the multi-arch image (bump the suffix for every rebuild of the same upstream version):
+The production image `ghcr.io/uninow/kratos` is **not** built from this branch directly. It is built by
+[UniNow/custom-images](https://github.com/UniNow/custom-images) (`kratos/`, workflow `.github/workflows/kratos.yaml`):
+the workflow checks out upstream `ory/kratos` at the release tag, applies `kratos/uninow.patch` and builds with
+`.docker/Dockerfile-build`. Renovate bumps the Kratos version there whenever Ory publishes a release, and the
+pull request build fails if the patch no longer applies.
+
+This branch is where the patch is maintained: a few commits on top of the upstream release tag. After changing
+it, regenerate the patch and open a pull request in custom-images:
 
 ```
-VERSION=v26.2.0-1
+git diff v26.2.0 uninow-v26.2.0 > /path/to/custom-images/kratos/uninow.patch
+```
+
+The rebase procedure for a new Kratos release is documented in custom-images `kratos/README.md`.
+
+Manual fallback build, same result as the workflow (bump the suffix for every rebuild of the same upstream version):
+
+```
+VERSION=v26.2.0-manual1
 docker buildx build --platform linux/arm64,linux/amd64 --push \
   -f .docker/Dockerfile-build \
   --build-arg VERSION=$VERSION \
