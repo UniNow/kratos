@@ -91,7 +91,9 @@ func TestStrategy(t *testing.T) {
 		t,
 		conf,
 		newOIDCProvider(t, ts, remotePublic, remoteAdmin, "valid"),
-		newOIDCProvider(t, ts, remotePublic, remoteAdmin, "valid2"),
+		newOIDCProvider(t, ts, remotePublic, remoteAdmin, "valid2", func(c *oidc.Configuration) {
+			c.CaptureLastTokens = true
+		}),
 		newOIDCProvider(t, ts, remotePublic, remoteAdmin, "secondProvider"),
 		newOIDCProvider(t, ts, remotePublic, remoteAdmin, "claimsViaUserInfo", func(c *oidc.Configuration) {
 			c.ClaimsSource = oidc.ClaimsSourceUserInfo
@@ -437,7 +439,10 @@ func TestStrategy(t *testing.T) {
 				t,
 				json.RawMessage(fmt.Sprintf(`{"providers": [{"subject":"%s","provider":"%s"}]}`, subject, provider)),
 				json.RawMessage(c),
-				[]string{"providers.0.initial_id_token", "providers.0.initial_access_token", "providers.0.initial_refresh_token"},
+				[]string{
+					"providers.0.initial_id_token", "providers.0.initial_access_token", "providers.0.initial_refresh_token",
+					"providers.0.last_id_token", "providers.0.last_access_token", "providers.0.last_refresh_token",
+				},
 			)
 		}
 
@@ -483,7 +488,10 @@ func TestStrategy(t *testing.T) {
 			t,
 			json.RawMessage(fmt.Sprintf(`{"providers": [{"subject":"%s","provider":"%s"}]}`, subject, provider)),
 			json.RawMessage(c),
-			[]string{"providers.0.initial_id_token", "providers.0.initial_access_token", "providers.0.initial_refresh_token"},
+			[]string{
+				"providers.0.initial_id_token", "providers.0.initial_access_token", "providers.0.initial_refresh_token",
+				"providers.0.last_id_token", "providers.0.last_access_token", "providers.0.last_refresh_token",
+			},
 		)
 		return id
 	}
@@ -786,6 +794,53 @@ func TestStrategy(t *testing.T) {
 			require.NoError(t, res.Body.Close())
 
 			assert.Contains(t, string(body), "The authorization code has already been used", "%s", body)
+		})
+	})
+
+	t.Run("case=capture last tokens", func(t *testing.T) {
+		accessTokens := func(t *testing.T, id uuid.UUID) (initial, last string) {
+			i, err := reg.PrivilegedIdentityPool().GetIdentityConfidential(context.Background(), id)
+			require.NoError(t, err)
+			c := i.Credentials[identity.CredentialsTypeOIDC].Config
+			return gjson.GetBytes(c, "providers.0.initial_access_token").String(), gjson.GetBytes(c, "providers.0.last_access_token").String()
+		}
+
+		// registerThenLogin registers a new identity with the given provider and logs in once more.
+		// It returns the (initial, last) access tokens after registration and after login.
+		registerThenLogin := func(t *testing.T, provider string) (afterRegistration, afterLogin [2]string) {
+			r := newBrowserRegistrationFlow(t, returnTS.URL, time.Minute)
+			action := assertFormValues(t, r.ID, provider)
+			res, body := makeRequest(t, provider, action, url.Values{})
+			assertIdentity(t, res, body)
+			id := expectTokens(t, provider, body)
+			afterRegistration[0], afterRegistration[1] = accessTokens(t, id)
+
+			l := newBrowserLoginFlow(t, returnTS.URL, time.Minute)
+			action = assertFormValues(t, l.ID, provider)
+			res, body = makeRequest(t, provider, action, url.Values{})
+			assertIdentity(t, res, body)
+			require.Equal(t, id, expectTokens(t, provider, body))
+			afterLogin[0], afterLogin[1] = accessTokens(t, id)
+			return
+		}
+
+		scope = []string{"openid", "offline"}
+
+		t.Run("case=login replaces last tokens when capture_last_tokens is enabled", func(t *testing.T) {
+			subject = "capture-last-tokens-enabled@ory.sh"
+			afterRegistration, afterLogin := registerThenLogin(t, "valid2")
+			require.NotEmpty(t, afterRegistration[0])
+			assert.Equal(t, afterRegistration[0], afterRegistration[1], "right after registration the last tokens equal the initial tokens")
+			assert.Equal(t, afterRegistration[0], afterLogin[0], "initial tokens must never be overwritten")
+			assert.NotEqual(t, afterRegistration[1], afterLogin[1], "last tokens must be replaced on login")
+		})
+
+		t.Run("case=login keeps last tokens when capture_last_tokens is disabled", func(t *testing.T) {
+			subject = "capture-last-tokens-disabled@ory.sh"
+			afterRegistration, afterLogin := registerThenLogin(t, "valid")
+			require.NotEmpty(t, afterRegistration[0])
+			assert.Equal(t, afterRegistration[0], afterRegistration[1])
+			assert.Equal(t, afterRegistration, afterLogin, "credentials must not be touched on login")
 		})
 	})
 

@@ -158,15 +158,22 @@ func (s *Strategy) handleConflictingIdentity(ctx context.Context, loginFlow *log
 	return verdict, existingIdentity, creds, nil
 }
 
-func (s *Strategy) ProcessLogin(ctx context.Context, w http.ResponseWriter, r *http.Request, loginFlow *login.Flow, token *identity.CredentialsOIDCEncryptedTokens, claims *Claims, provider Provider, container *AuthCodeContainer) (_ *registration.Flow, err error) {
+func (s *Strategy) ProcessLogin(
+	ctx context.Context, w http.ResponseWriter, r *http.Request, loginFlow *login.Flow,
+	token *identity.CredentialsOIDCEncryptedTokens, claims *Claims, provider Provider, container *AuthCodeContainer,
+) (_ *registration.Flow, err error) {
 	ctx, span := s.d.Tracer(ctx).Tracer().Start(ctx, "selfservice.strategy.oidc.Strategy.processLogin")
 	defer otelx.End(span, &err)
 
-	i, c, err := s.d.PrivilegedIdentityPool().FindByCredentialsIdentifier(ctx, s.ID(), identity.OIDCUniqueID(provider.Config().ID, claims.Subject))
+	merge := false
+	i, c, err := s.d.PrivilegedIdentityPool().FindByCredentialsIdentifier(
+		ctx, s.ID(), identity.OIDCUniqueID(provider.Config().ID, claims.Subject),
+	)
 	if err != nil {
 		if errors.Is(err, sqlcon.ErrNoRows) {
 			var verdict ConflictingIdentityVerdict
 			verdict, i, c, err = s.handleConflictingIdentity(ctx, loginFlow, token, claims, provider, container)
+			merge = true
 			switch verdict {
 			case ConflictingIdentityVerdictMerge:
 				// Do nothing
@@ -217,7 +224,9 @@ func (s *Strategy) ProcessLogin(ctx context.Context, w http.ResponseWriter, r *h
 				// We are converting the flow here, but want to retain the original request URL.
 				registrationFlow.RequestURL = loginFlow.RequestURL
 
-				if _, err := s.processRegistration(ctx, w, r, registrationFlow, token, claims, provider, container); err != nil {
+				if _, err := s.processRegistration(
+					ctx, w, r, registrationFlow, token, claims, provider, container,
+				); err != nil {
 					return registrationFlow, err
 				}
 
@@ -243,21 +252,56 @@ func (s *Strategy) ProcessLogin(ctx context.Context, w http.ResponseWriter, r *h
 	}
 
 	sess := session.NewInactiveSession()
-	sess.CompletedLoginForWithProvider(s.ID(), identity.AuthenticatorAssuranceLevel1, provider.Config().ID, provider.Config().OrganizationID)
+	sess.CompletedLoginForWithProvider(
+		s.ID(), identity.AuthenticatorAssuranceLevel1, provider.Config().ID, provider.Config().OrganizationID,
+	)
 
-	for _, c := range oidcCredentials.Providers {
-		if c.Subject == claims.Subject && c.Provider == provider.Config().ID {
-			if err = s.d.LoginHookExecutor().PostLoginHook(w, r, node.OpenIDConnectGroup, loginFlow, i, sess, provider.Config().ID); err != nil {
-				return nil, x.WrapWithIdentityIDError(s.HandleError(ctx, w, r, loginFlow, provider.Config().ID, nil, err), i.ID)
-			}
-			return nil, nil
+	pos, found := oidcCredentials.GetProvider(provider.Config().ID, claims.Subject)
+	if !found {
+		return nil, s.HandleError(
+			ctx, w, r, loginFlow, provider.Config().ID, nil, errors.WithStack(
+				herodot.ErrInternalServerError.WithReason("Unable to find matching OpenID Connect Credentials.").WithDebugf(
+					`Unable to find credentials that match the given provider "%s" and subject "%s".`,
+					provider.Config().ID, claims.Subject,
+				),
+			),
+		)
+	}
+
+	if !merge && provider.Config().CaptureLastTokens {
+		i, _, err = s.handleCapturingTokens(ctx, token, oidcCredentials, pos, c, i)
+		if err != nil {
+			return nil, s.HandleError(ctx, w, r, loginFlow, provider.Config().ID, nil, err)
 		}
 	}
 
-	return nil, s.HandleError(ctx, w, r, loginFlow, provider.Config().ID, nil, x.WrapWithIdentityIDError(errors.WithStack(herodot.ErrInternalServerError.WithReason("Unable to find matching OpenID Connect credentials.").WithDebugf(`Unable to find credentials that match the given provider "%s" and subject "%s".`, provider.Config().ID, claims.Subject)), i.ID))
+	if err = s.d.LoginHookExecutor().PostLoginHook(
+		w, r, node.OpenIDConnectGroup, loginFlow, i, sess, provider.Config().ID,
+	); err != nil {
+		return nil, x.WrapWithIdentityIDError(s.HandleError(ctx, w, r, loginFlow, provider.Config().ID, nil, err), i.ID)
+	}
+
+	return nil, nil
 }
 
-func (s *Strategy) Login(w http.ResponseWriter, r *http.Request, f *login.Flow, _ *session.Session) (i *identity.Identity, err error) {
+func (s *Strategy) handleCapturingTokens(ctx context.Context, token *identity.CredentialsOIDCEncryptedTokens, oidcCredentials identity.CredentialsOIDC, index int, c *identity.Credentials, i *identity.Identity) (id *identity.Identity, credentials *identity.Credentials, err error) {
+	oidcCredentials.Providers[index].LastIDToken = token.GetIDToken()
+	oidcCredentials.Providers[index].LastAccessToken = token.GetAccessToken()
+	oidcCredentials.Providers[index].LastRefreshToken = token.GetRefreshToken()
+	c.Config, err = json.Marshal(oidcCredentials)
+	if err != nil {
+		return nil, nil, err
+	}
+	i.SetCredentials(identity.CredentialsTypeOIDC, *c)
+	if err = s.d.PrivilegedIdentityPool().UpdateIdentity(ctx, i); err != nil {
+		return nil, nil, err
+	}
+	return i, c, nil
+}
+
+func (s *Strategy) Login(
+	w http.ResponseWriter, r *http.Request, f *login.Flow, _ *session.Session,
+) (i *identity.Identity, err error) {
 	ctx, span := s.d.Tracer(r.Context()).Tracer().Start(r.Context(), "selfservice.strategy.oidc.Strategy.Login")
 	defer otelx.End(span, &err)
 
@@ -442,8 +486,12 @@ func (s *Strategy) removeProviders(conf *ConfigurationCollection, f *login.Flow)
 	}
 }
 
-func (s *Strategy) PopulateLoginMethodIdentifierFirstCredentials(r *http.Request, f *login.Flow, mods ...login.FormHydratorModifier) (err error) {
-	ctx, span := s.d.Tracer(r.Context()).Tracer().Start(r.Context(), "selfservice.strategy.oidc.Strategy.PopulateLoginMethodIdentifierFirstCredentials")
+func (s *Strategy) PopulateLoginMethodIdentifierFirstCredentials(
+	r *http.Request, f *login.Flow, mods ...login.FormHydratorModifier,
+) (err error) {
+	ctx, span := s.d.Tracer(r.Context()).Tracer().Start(
+		r.Context(), "selfservice.strategy.oidc.Strategy.PopulateLoginMethodIdentifierFirstCredentials",
+	)
 	defer otelx.End(span, &err)
 
 	conf, err := s.Config(ctx)

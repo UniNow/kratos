@@ -157,6 +157,11 @@ type Configuration struct {
 	// Possible values: "confirm_with_existing_credential" (default), "automatic".
 	// This is only effective in the Ory Network.
 	AccountLinkingMode string `json:"account_linking_mode,omitempty"`
+
+	// CaptureLastTokens controls whether to capture and store the last tokens received during login.
+	// When enabled, the LastIDToken, LastAccessToken, and LastRefreshToken fields will be updated
+	// on each successful login.
+	CaptureLastTokens bool `json:"capture_last_tokens"`
 }
 
 func (p Configuration) Redir(public *url.URL) string {

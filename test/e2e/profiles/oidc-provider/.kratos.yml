@@ -15,6 +15,7 @@ selfservice:
         providers:
           - id: google
             provider: generic
+            capture_last_tokens: true
             client_id: ${OIDC_GOOGLE_CLIENT_ID}
             client_secret: ${OIDC_GOOGLE_CLIENT_SECRET}
             issuer_url: http://localhost:4444/

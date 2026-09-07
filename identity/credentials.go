@@ -4,6 +4,7 @@
 package identity
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -12,6 +13,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/pkg/errors"
 
 	"github.com/gofrs/uuid"
 	"github.com/wI2L/jsondiff"
@@ -193,6 +196,10 @@ func (c Credentials) TableName(context.Context) string {
 
 func (c Credentials) GetID() uuid.UUID {
 	return c.ID
+}
+
+func (c Credentials) UnmarshalConfig(target interface{}) error {
+	return errors.WithStack(json.NewDecoder(bytes.NewBuffer(c.Config)).Decode(&target))
 }
 
 // Signature returns a unique string signature for the credential.
